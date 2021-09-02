@@ -1,6 +1,7 @@
 import express from "express";
 import http from "http";
-import SocketIO from "socket.io";
+import { Server } from "socket.io";
+import { instrument } from "@socket.io/admin-ui";
 
 const app = express();
 
@@ -11,21 +12,64 @@ app.get("/", (req, res) => res.render("home"));
 app.get("/*", (req, res) => res.redirect("/"));
 
 const server = http.createServer(app);
-const io = SocketIO(server);
+const io = new Server(server, {
+  cors: {
+    origin: ["https://admin.socket.io"],
+    credentials: true,
+  },
+});
+
+instrument(io, {
+  auth: false,
+});
+
+function publicRooms() {
+  const {
+    sockets: {
+      adapter: { sids, rooms },
+    },
+  } = io;
+  const publicRooms = [];
+  rooms.forEach((_, key) => {
+    if (sids.get(key) === undefined) {
+      publicRooms.push(key);
+    }
+  });
+  return publicRooms;
+}
+
+function countRoom(roomName) {
+  return io.sockets.adapter.rooms.get(roomName)?.size;
+}
 
 io.on("connection", (socket) => {
+  socket["nickname"] = "Anonymous";
+  socket.onAny((event) => {
+    console.log(`Socket Event: ${event}`);
+  });
   socket.on("enter_room", (roomName, done) => {
     socket.join(roomName.payload);
     done();
-    socket.to(roomName.payload).emit("welcome"); // except for me!
+    socket
+      .to(roomName.payload)
+      .emit("welcome", socket.nickname, countRoom(roomName.payload)); // except for me!
+    io.sockets.emit("room_change", publicRooms());
   });
-  socket.on("disconnecting", () => {
-    socket.rooms.forEach((room) => socket.to(room).emit("bye"));
+  socket.on("disconnecting", (roomName) => {
+    socket.rooms.forEach((room) =>
+      socket
+        .to(room)
+        .emit("bye", socket.nickname, countRoom(roomName.payload) - 1)
+    );
+  });
+  socket.on("disconnect", () => {
+    io.sockets.emit("room_change", publicRooms());
   });
   socket.on("new_message", (msg, room, done) => {
-    socket.to(room).emit("new_message", msg);
+    socket.to(room).emit("new_message", `${socket.nickname} : ${msg}`);
     done();
   });
+  socket.on("nickname", (nickname) => (socket["nickname"] = nickname));
 });
 
 //the lines below are the wss
